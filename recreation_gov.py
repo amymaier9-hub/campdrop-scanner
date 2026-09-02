@@ -91,6 +91,20 @@ RECAREA_IDS = {
 # new/unrecognized status can't accidentally get treated as an opening.
 AVAILABLE_STATUSES = {"Available", "Open"}
 
+# Facilities that Recreation.gov lists under a recarea's campground search
+# but that 404 on the standard month-availability endpoint -- confirmed live
+# in production on 2026-09-02 (4 straight 404s polling Sleeping Bear Dunes).
+# 259245 = "Village Campground - North Manitou Island": a boat-in wilderness
+# campground (no vehicle access, ferry-only) that lacked a "reserve_type" in
+# its search listing during initial research, unlike every bookable
+# campground here -- a sign it's a permit-based backcountry area rather than
+# a standard site-reservation campground, so it doesn't work through this
+# API path. Per product decision (2026-09-02), it should never be offered as
+# an alertable option at all rather than silently retried and skipped every
+# poll -- so it's filtered out at discovery time, before it's ever cached or
+# scanned.
+EXCLUDED_FACILITY_IDS = {"259245"}
+
 FACILITY_CACHE_FILE = Path(__file__).parent / "recreation_gov_facility_cache.json"
 
 REQUEST_DELAY_SECONDS = 0.35  # be a polite API citizen -- see SCALE NOTE above
@@ -225,7 +239,7 @@ def discover_facilities(session: requests.Session, recarea_id) -> list:
     return [
         {"facility_id": r["entity_id"], "name": r.get("name") or str(r["entity_id"])}
         for r in results
-        if r.get("entity_id")
+        if r.get("entity_id") and str(r["entity_id"]) not in EXCLUDED_FACILITY_IDS
     ]
 
 
