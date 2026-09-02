@@ -152,21 +152,56 @@ def send_sms(session: requests.Session, to_phone: str, message: str) -> tuple:
 
 
 def build_message(park_name: str, site_name: str, date_str: str, nights: int,
-                   booking_domain: str = "midnrreservations.com") -> str:
+                   booking_url: str) -> str:
     """
-    booking_domain defaults to MiDNR's site for backward compatibility, but
-    callers MUST pass the correct domain for Recreation.gov parks -- telling
-    a subscriber to "book now at midnrreservations.com" for a Sleeping Bear
-    Dunes or Pictured Rocks opening (which books on recreation.gov, an
-    entirely different site) would be actively wrong, not just imprecise.
-    See main()'s dispatch branch for how this is selected per park.
+    booking_url must be a direct link into the correct booking site for
+    THIS park -- MiDNRReservations.com for MiDNR parks, recreation.gov for
+    Recreation.gov parks. Callers MUST pass the right one; sending a
+    subscriber a recreation.gov link for a MiDNR opening (or vice versa)
+    would be actively wrong, not just imprecise. See main()'s dispatch
+    branch and build_midnr_booking_url() for how each is built per park.
     """
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     friendly_date = date_obj.strftime("%b %-d")
     return (
         f"\U0001F3D5\uFE0F MITTENCAMPER — Site {site_name} at {park_name} just opened "
         f"for {friendly_date} ({nights} night{'s' if nights != 1 else ''}). "
-        f"Book now at {booking_domain} before it's gone!"
+        f"Book now: {booking_url}"
+    )
+
+
+def build_midnr_booking_url(resource_location_id, map_id, date_str: str, nights: int) -> str:
+    """
+    Builds a direct link into MiDNRReservations.com's live availability
+    list for the specific LOOP this site belongs to, pre-filled with the
+    subscriber's dates -- as close to a one-click "go book this" link as
+    Aspira's booking engine supports.
+
+    Unlike Recreation.gov, Aspira has no stable public URL for a single
+    campsite -- picking one only happens inside an active shopping-cart
+    session (confirmed live 2026-09-02: clicking "Reserve" on a specific
+    site creates a cartUid/bookingUid-scoped session and lands on
+    /create-booking/reservationmessages, not a bookmarkable per-site page).
+    So this lands the subscriber on the correct loop's site list instead,
+    with the right park/loop/dates already selected -- their specific site
+    will be right there on the list, just not pre-selected for them.
+
+    Verified live that resourceLocationId + mapId + startDate + endDate +
+    nights + isReserving=true is enough on its own (no cart/session state
+    required) to deep-link a fresh visitor straight to that loop.
+
+    Falls back to the plain homepage if resource_location_id or map_id is
+    unexpectedly missing, rather than emitting a broken/malformed link.
+    """
+    if not resource_location_id or not map_id:
+        return "https://midnrreservations.com"
+    arrival = datetime.strptime(date_str, "%Y-%m-%d")
+    departure = arrival + timedelta(days=nights)
+    return (
+        "https://midnrreservations.com/create-booking/results?"
+        f"resourceLocationId={resource_location_id}&mapId={map_id}"
+        f"&startDate={arrival:%Y-%m-%d}&endDate={departure:%Y-%m-%d}"
+        f"&nights={nights}&isReserving=true"
     )
 
 
@@ -356,7 +391,16 @@ def normalize_availability_code(code) -> int:
 
 
 def fetch_park_availability(session: requests.Session, loop_map_ids: list) -> tuple:
+    """
+    Returns (combined, start_date, resource_map_ids). resource_map_ids is a
+    {resource_id: map_id} dict recording which LEAF loop each resource came
+    from -- needed by build_midnr_booking_url() to link a subscriber
+    straight to the right loop's availability list rather than just the
+    site's homepage. A resource_id is only ever returned by one leaf loop
+    at a time, so there's no collision risk in overwriting entries here.
+    """
     combined = {}
+    resource_map_ids = {}
     start_date = _today_str()
     end_date = _plus_days_str(DAYS_AHEAD)
     for map_id in loop_map_ids:
@@ -375,7 +419,8 @@ def fetch_park_availability(session: requests.Session, loop_map_ids: list) -> tu
         data = resp.json()
         for resource_id, day_codes in data.get("resourceAvailabilities", {}).items():
             combined[resource_id] = [normalize_availability_code(c) for c in day_codes]
-    return combined, start_date
+            resource_map_ids[resource_id] = map_id
+    return combined, start_date, resource_map_ids
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +589,11 @@ def main():
     rg_facility_cache = rg.load_facility_cache()
     previous_state = load_last_state()
     metadata_cache = {}
+    # MiDNR only -- resource_location_id is needed (alongside each site's
+    # map_id, merged into metadata_cache below) to build a direct MiDNR
+    # booking link. Recreation.gov needs neither: its metadata already
+    # carries a ready-to-use booking_url per site.
+    park_resource_location_ids = {}
 
     print(f"Starting poll loop (every {POLL_INTERVAL_SECONDS}s). Ctrl+C to stop.\n")
 
@@ -596,15 +646,25 @@ def main():
                 park_info = get_or_discover_park_maps(session, park_name, all_locations, park_map_cache)
                 if not park_info:
                     continue
+                park_resource_location_ids[park_name] = park_info["resource_location_id"]
 
                 if park_name not in metadata_cache:
                     metadata_cache[park_name] = fetch_resource_metadata(session, park_info["resource_location_id"])
 
                 try:
-                    current_state, start_date = fetch_park_availability(session, park_info["loop_map_ids"])
+                    current_state, start_date, resource_map_ids = fetch_park_availability(
+                        session, park_info["loop_map_ids"]
+                    )
                 except requests.RequestException as e:
                     print(f"  ERROR fetching availability for '{park_name}': {e}")
                     continue
+
+                # resource_map_ids is recomputed fresh every poll (it's cheap
+                # -- it falls out of the availability call we already made),
+                # so merge it into metadata_cache every time even though the
+                # name/existence part of metadata_cache is only fetched once.
+                for resource_id, map_id in resource_map_ids.items():
+                    metadata_cache[park_name].setdefault(resource_id, {})["map_id"] = map_id
 
             current_state_all[park_name] = current_state
             prev_state_for_park = previous_state.get(park_name, {})
@@ -627,8 +687,17 @@ def main():
                 # would incorrectly silence a real FUTURE re-opening of the
                 # same site+date if it gets booked and later cancels again.
                 # sms_log is still written below, purely as an audit trail.
-                booking_domain = "recreation.gov" if rg.is_recreation_gov_park(park_name) else "midnrreservations.com"
-                message = build_message(m["park_name"], m["site_name"], m["date"], m["nights"], booking_domain)
+                if rg.is_recreation_gov_park(park_name):
+                    booking_url = metadata_cache[park_name].get(m["resource_id"], {}).get(
+                        "booking_url", "https://www.recreation.gov"
+                    )
+                else:
+                    booking_url = build_midnr_booking_url(
+                        park_resource_location_ids.get(park_name),
+                        metadata_cache[park_name].get(m["resource_id"], {}).get("map_id"),
+                        m["date"], m["nights"],
+                    )
+                message = build_message(m["park_name"], m["site_name"], m["date"], m["nights"], booking_url)
                 success, twilio_sid = send_sms(session, m["phone"], message)
                 if success:
                     log_sms_sent(
