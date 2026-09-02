@@ -210,7 +210,16 @@ def fetch_facility_availability(session: requests.Session, facility_id, facility
                 name = f"{site_label}, {facility_name}"
                 if loop:
                     name += f" ({loop} Loop)"
-                metadata[campsite_id] = {"name": name}
+                # Unlike MiDNR/Aspira, Recreation.gov gives every campsite a
+                # stable, public, no-login-required detail/booking page at
+                # this exact URL shape -- confirmed live 2026-09-02 (landed
+                # directly on "Site 01, D.H. Day Campground" with dates ready
+                # to pick). No cart/session state needed, so it's safe to
+                # text straight to a subscriber.
+                metadata[campsite_id] = {
+                    "name": name,
+                    "booking_url": f"{BASE_URL}/camping/campsites/{campsite_id}",
+                }
 
             for date_str, status in (site.get("availabilities") or {}).items():
                 try:
