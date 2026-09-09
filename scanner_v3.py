@@ -43,6 +43,14 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
 
+# --- One-off manual test hook ---
+# Set TEST_ALERT_PHONE (E.164, e.g. +19891234567) as a Railway variable to
+# make the worker send ONE real test SMS on startup using known-live sample
+# data, then continue into its normal poll loop as usual. Leave unset for
+# normal operation. Remove the variable again after testing so it doesn't
+# resend on every future redeploy.
+TEST_ALERT_PHONE = os.environ.get("TEST_ALERT_PHONE", "").strip()
+
 POLL_INTERVAL_SECONDS = 60
 DAYS_AHEAD = 120
 
@@ -648,6 +656,37 @@ def save_state(state: dict) -> None:
 
 # ---------------------------------------------------------------------------
 # Main loop
+
+
+def run_test_alert(session: requests.Session) -> None:
+    """
+    One-off manual test, triggered by the TEST_ALERT_PHONE env var (see
+    top of file). Sends a real SMS built from known-live sample data
+    (Bay City State Recreation Area, Site 4, confirmed open 2026-09-11)
+    through the exact same build_message()/send_sms() path production
+    alerts use, so the output is a true preview of what a subscriber gets.
+    """
+    print(f"TEST MODE: TEST_ALERT_PHONE is set -- sending one test alert to {TEST_ALERT_PHONE}")
+    resource_location_id = -2147483636
+    map_id = -2147483624
+    site_id = "-2147481793"  # internal id for Site "4"
+    site_name = "4"
+    date_str = "2026-09-11"
+    nights = 2
+
+    try:
+        loop_by_resource = fetch_loop_names(session, resource_location_id)
+        loop_name = loop_by_resource.get(site_id)
+        booking_url = build_midnr_booking_url(resource_location_id, map_id, date_str, nights)
+        message = build_message(
+            "Bay City State Recreation Area", site_name, date_str, nights,
+            booking_url, loop_name=loop_name,
+        )
+        print("TEST MESSAGE:\n" + message)
+        success, sid = send_sms(session, TEST_ALERT_PHONE, message)
+        print(f"TEST send_sms result: success={success} sid={sid}")
+    except Exception as e:
+        print(f"TEST MODE ERROR: {e}")
 # ---------------------------------------------------------------------------
 
 def main():
@@ -661,6 +700,9 @@ def main():
     park_map_cache = load_park_map_cache()
     rg_facility_cache = rg.load_facility_cache()
     previous_state = load_last_state()
+
+    if TEST_ALERT_PHONE:
+        run_test_alert(session)
     metadata_cache = {}
     # MiDNR only -- resource_location_id is needed (alongside each site's
     # map_id, merged into metadata_cache below) to build a direct MiDNR
