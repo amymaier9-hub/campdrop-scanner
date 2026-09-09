@@ -152,7 +152,7 @@ def send_sms(session: requests.Session, to_phone: str, message: str) -> tuple:
 
 
 def build_message(park_name: str, site_name: str, date_str: str, nights: int,
-                   booking_url: str) -> str:
+                   booking_url: str, loop_name: str = None) -> str:
     """
     booking_url must be a direct link into the correct booking site for
     THIS park -- MiDNRReservations.com for MiDNR parks, recreation.gov for
@@ -160,12 +160,35 @@ def build_message(park_name: str, site_name: str, date_str: str, nights: int,
     subscriber a recreation.gov link for a MiDNR opening (or vice versa)
     would be actively wrong, not just imprecise. See main()'s dispatch
     branch and build_midnr_booking_url() for how each is built per park.
+
+    loop_name is MiDNR-specific (see fetch_loop_names()) -- Recreation.gov
+    already bakes its loop info straight into site_name (see
+    recreation_gov.py's fetch_facility_availability), so passing loop_name
+    there would double it up. None/empty just omits it from the site line
+    rather than showing an awkward blank -- e.g. a brand-new site the loop
+    lookup hasn't caught up to yet still gets a text, just without a loop.
     """
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    departure_obj = date_obj + timedelta(days=nights)
     friendly_date = date_obj.strftime("%b %-d")
+    date_range = (
+        f"{friendly_date}–{departure_obj.day}" if departure_obj.month == date_obj.month
+        else f"{friendly_date}–{departure_obj.strftime('%b %-d')}"
+    )
+    if loop_name:
+        site_line = f"{loop_name}, Site {site_name}"
+    elif "," in site_name:
+        # Recreation.gov's site_name already IS a full descriptive string
+        # (e.g. "Site 01, D.H. Day Campground (Loop A Loop)" -- see
+        # recreation_gov.py's fetch_facility_availability) -- prepending
+        # "Site " again here would double it up ("Site Site 01, ...").
+        site_line = site_name
+    else:
+        site_line = f"Site {site_name}"
     return (
-        f"\U0001F3D5\uFE0F MITTENCAMPER — Site {site_name} at {park_name} just opened "
-        f"for {friendly_date} ({nights} night{'s' if nights != 1 else ''}). "
+        f"\U0001F3D5️ Site open at {park_name} — {site_line}. "
+        f"{date_range}, {nights} night{'s' if nights != 1 else ''}. "
+        f"Act fast — cancellations rebook in seconds.\n"
         f"Book now: {booking_url}"
     )
 
@@ -358,6 +381,40 @@ def get_or_discover_park_maps(session, park_name, all_locations, cache):
     return cache[park_name]
 
 
+def fetch_loop_names(session: requests.Session, resource_location_id: int) -> dict:
+    """
+    One-time (cacheable, folded into fetch_resource_metadata below) lookup:
+    resource_id -> the name of the LOOP that site belongs to (e.g. "Front
+    Beechwood", "Cedar East Loop"), so subscriber texts can say something
+    more useful than a bare site number. Confirmed live 2026-09-09 via
+    GET /api/maps?resourceLocationId=X, which returns every loop-level map
+    for the park, each with a human-readable title and the list of sites
+    (mapResources) that belong to it -- a different, richer endpoint than
+    the leaf-only map IDs discover_loop_maps() walks for availability.
+
+    Loop titles are inconsistent about already including the word "Loop"
+    (e.g. "Cedar East Loop" vs "Jackpine") -- used verbatim, never appended
+    to, so we don't end up with "Cedar East Loop Loop".
+    """
+    url = f"{BASE_URL}/api/maps"
+    params = {"resourceLocationId": resource_location_id}
+    resp = session.get(url, params=params, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    raw = resp.json()
+
+    loop_by_resource = {}
+    for map_entry in raw:
+        lv = next((l for l in map_entry.get("localizedValues", []) if l.get("cultureName") == "en-US"), {})
+        title = lv.get("title")
+        if not title:
+            continue
+        for res in map_entry.get("mapResources", []):
+            resource_id = res.get("resourceId")
+            if resource_id is not None:
+                loop_by_resource[str(resource_id)] = title
+    return loop_by_resource
+
+
 def fetch_resource_metadata(session: requests.Session, resource_location_id: int) -> dict:
     url = f"{BASE_URL}/api/resourcelocation/resources"
     params = {"resourceLocationId": resource_location_id}
@@ -372,6 +429,19 @@ def fetch_resource_metadata(session: requests.Session, resource_location_id: int
                 name = lv.get("name")
                 break
         metadata[resource_id] = {"name": name or resource_id}
+
+    # Best-effort: merge in each site's loop name so subscriber texts can
+    # say more than a bare site number. If this call fails for any reason,
+    # fall back to no loop info rather than losing site metadata (and
+    # therefore the whole park) over it.
+    try:
+        loop_by_resource = fetch_loop_names(session, resource_location_id)
+        for resource_id, loop_name in loop_by_resource.items():
+            if resource_id in metadata:
+                metadata[resource_id]["loop"] = loop_name
+    except requests.RequestException as e:
+        print(f"    WARNING: couldn't fetch loop names for resourceLocationId {resource_location_id}: {e}")
+
     return metadata
 
 
@@ -496,6 +566,7 @@ def match_alerts_for_park(park_alerts: list, current_state: dict, previous_state
             continue  # first-ever observation -- baseline only, no alerts
 
         site_name = metadata.get(resource_id, {}).get("name", resource_id)
+        loop_name = metadata.get(resource_id, {}).get("loop")
 
         for alert in park_alerts:
             if alert.get("specific_site") and alert["specific_site"].strip() != site_name.strip():
@@ -523,6 +594,7 @@ def match_alerts_for_park(park_alerts: list, current_state: dict, previous_state
                     matches.append({
                         "alert_id": alert["id"], "phone": alert["phone"], "park_name": alert["park_name"],
                         "resource_id": resource_id, "site_name": site_name, "date": run_date, "nights": min_nights,
+                        "loop_name": loop_name,
                     })
             else:
                 target_date = alert.get("arrival_date")
@@ -536,6 +608,7 @@ def match_alerts_for_park(park_alerts: list, current_state: dict, previous_state
                     matches.append({
                         "alert_id": alert["id"], "phone": alert["phone"], "park_name": alert["park_name"],
                         "resource_id": resource_id, "site_name": site_name, "date": target_date, "nights": min_nights,
+                        "loop_name": loop_name,
                     })
 
     return matches
@@ -697,14 +770,17 @@ def main():
                         metadata_cache[park_name].get(m["resource_id"], {}).get("map_id"),
                         m["date"], m["nights"],
                     )
-                message = build_message(m["park_name"], m["site_name"], m["date"], m["nights"], booking_url)
+                message = build_message(
+                    m["park_name"], m["site_name"], m["date"], m["nights"], booking_url,
+                    loop_name=m.get("loop_name"),
+                )
                 success, twilio_sid = send_sms(session, m["phone"], message)
                 if success:
                     log_sms_sent(
                         session, m["alert_id"], m["resource_id"], m["site_name"],
                         m["date"], m["park_name"], m["phone"], message, twilio_sid, DRY_RUN
                     )
-                    print(f"  \U0001F3D5\uFE0F  MATCH: {m['park_name']} — Site {m['site_name']} on {m['date']} "
+                    print(f"  \U0001F3D5️  MATCH: {m['park_name']} — Site {m['site_name']} on {m['date']} "
                           f"({m['nights']} night(s)) -> texted {m['phone']}")
 
         save_state(current_state_all)
