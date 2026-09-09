@@ -29,7 +29,7 @@ BASE_URL = "https://midnrreservations.com"
 # subscriber phone numbers and read/write sms_log, which are intentionally
 # NOT exposed to the public anon key for privacy reasons.
 SUPABASE_URL = "https://xviqwcivsmjjrduasamo.supabase.co"
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY","").strip()
 if not SUPABASE_SERVICE_ROLE_KEY:
     print("FATAL: SUPABASE_SERVICE_ROLE_KEY environment variable is not set.")
     print("Set it with: export SUPABASE_SERVICE_ROLE_KEY=\"your-key-here\"")
@@ -39,9 +39,9 @@ if not SUPABASE_SERVICE_ROLE_KEY:
 # DRY_RUN defaults to True (safe) unless explicitly set to "false" in the
 # environment -- this lets you flip it on Railway without editing code.
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() != "false"
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
 
 POLL_INTERVAL_SECONDS = 60
 DAYS_AHEAD = 120
