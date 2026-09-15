@@ -222,6 +222,29 @@ def send_sms(session: requests.Session, to_phone: str, message: str) -> tuple:
     return True, resp.json().get("sid")
 
 
+def shorten_url(long_url: str) -> str:
+    """
+    Shortens a booking URL via TinyURL's free, no-account API so the SMS
+    reads cleanly on a phone screen instead of wrapping across several
+    lines -- MiDNR's deep-link URLs especially can run 130+ characters.
+    Falls back to the original long_url on any failure (network issue,
+    non-200 response, empty/unexpected body): a working long link beats a
+    broken short one, and this must never stop a real alert from sending.
+    """
+    try:
+        resp = requests.get(
+            "https://tinyurl.com/api-create.php",
+            params={"url": long_url},
+            timeout=8,
+        )
+        short = resp.text.strip()
+        if resp.status_code == 200 and short.startswith("http"):
+            return short
+    except requests.RequestException as e:
+        print(f"    (URL shortening failed, using long URL: {e})")
+    return long_url
+
+
 def build_message(park_name: str, site_name: str, date_str: str, nights: int,
                    booking_url: str, loop_name: str = None) -> str:
     """
@@ -845,6 +868,7 @@ def main():
                         metadata_cache[park_name].get(m["resource_id"], {}).get("map_id"),
                         m["date"], m["nights"],
                     )
+                booking_url = shorten_url(booking_url)
                 message = build_message(
                     m["park_name"], m["site_name"], m["date"], m["nights"], booking_url,
                     loop_name=m.get("loop_name"),
