@@ -51,6 +51,32 @@ TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
 # resend on every future redeploy.
 TEST_ALERT_PHONE = os.environ.get("TEST_ALERT_PHONE", "").strip()
 
+# --- Health check heartbeat (healthchecks.io or compatible) ---
+# Set HEALTHCHECK_PING_URL as a Railway variable to a healthchecks.io "ping
+# URL" (looks like https://hc-ping.com/<uuid>) to get alerted if the scanner
+# goes quiet -- e.g. MiDNR/Recreation.gov change something on their end and
+# every fetch starts silently failing. Leave unset to disable (default);
+# the scanner runs completely normally either way.
+HEALTHCHECK_PING_URL = os.environ.get("HEALTHCHECK_PING_URL", "").strip()
+
+
+def ping_healthcheck(suffix: str = "") -> None:
+    """Fire-and-forget heartbeat ping. Called only after a poll cycle that
+    successfully talked to Supabase (and, when there were alerts to check,
+    successfully fetched availability for at least the cycle as a whole) --
+    NOT called when fetch_active_alerts() raises, so a genuinely broken
+    scanner (bad credentials, MiDNR/Recreation.gov breaking changes, etc.)
+    will go quiet and trigger the healthchecks.io alert as intended.
+    Never raises: a healthchecks.io outage or network blip must not take
+    down the actual scanner.
+    """
+    if not HEALTHCHECK_PING_URL:
+        return
+    try:
+        requests.get(f"{HEALTHCHECK_PING_URL}{suffix}", timeout=10)
+    except requests.RequestException as e:
+        print(f"  (healthcheck ping failed, non-fatal: {e})")
+
 POLL_INTERVAL_SECONDS = 60
 DAYS_AHEAD = 120
 
@@ -724,6 +750,7 @@ def main():
 
         if not alerts:
             print(f"[{timestamp}] No active alerts. Sleeping.")
+            ping_healthcheck()
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
@@ -827,6 +854,7 @@ def main():
 
         save_state(current_state_all)
         previous_state = current_state_all
+        ping_healthcheck()
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
