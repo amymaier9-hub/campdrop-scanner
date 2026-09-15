@@ -114,6 +114,51 @@ def fetch_active_alerts(session: requests.Session) -> list:
     return resp.json()
 
 
+def expire_stale_alerts(session: requests.Session) -> int:
+    """
+    Marks any 'active' alert whose target date has already passed as
+    'expired' -- single-date alerts once arrival_date < today, flexible-
+    window alerts once arrival_window_end < today. Called once at the top
+    of every poll cycle, before fetch_active_alerts(), so:
+      - a stale alert never gets checked against fresh availability
+        (harmless either way, since a past date can't appear in the
+        upcoming-availability window, but there's no reason to keep
+        checking it), and
+      - the customer's plan slot frees up automatically, since
+        create-alert's limit check only counts status='active' rows, and
+        the account page's alert list already hides non-active statuses.
+    Never raises: a failed expiry check must not stop the scanner from
+    polling for real availability. Returns the number of alerts expired
+    (0 on any error or when nothing was stale).
+    """
+    today = _today_str()
+    url = f"{SUPABASE_URL}/rest/v1/alerts"
+    params = {
+        "status": "eq.active",
+        "or": (
+            f"(and(flexible_dates.eq.false,arrival_date.lt.{today}),"
+            f"and(flexible_dates.eq.true,arrival_window_end.lt.{today}))"
+        ),
+    }
+    try:
+        resp = session.patch(
+            url,
+            headers={**SUPABASE_HEADERS, "Content-Type": "application/json", "Prefer": "return=representation"},
+            params=params,
+            json={"status": "expired"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        expired = resp.json()
+        if expired:
+            names = ", ".join(f"{a.get('park_name')}/{a.get('id')}" for a in expired)
+            print(f"  Expired {len(expired)} stale alert(s): {names}")
+        return len(expired)
+    except requests.RequestException as e:
+        print(f"  (expire_stale_alerts failed, non-fatal: {e})")
+        return 0
+
+
 def has_been_sms_logged(session: requests.Session, alert_id: str, resource_id: str, date_str: str) -> bool:
     """Checks sms_log for a prior text about this exact (alert, site, date)
     combo. NOT used to gate sending in the main loop (see the comment where
@@ -740,6 +785,8 @@ def main():
 
     while True:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        expire_stale_alerts(session)
 
         try:
             alerts = fetch_active_alerts(session)
